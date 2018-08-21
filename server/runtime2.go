@@ -35,9 +35,10 @@ const API_PREFIX = "/nakama.api.Nakama/"
 const RTAPI_PREFIX = "*rtapi.Envelope_"
 
 type (
-	Runtime2RpcFunction      func(queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code)
-	Runtime2BeforeRtFunction func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) (*rtapi.Envelope, error)
-	Runtime2AfterRtFunction  func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) error
+	Runtime2RpcFunction               func(queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code)
+	Runtime2BeforeRtFunction          func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) (*rtapi.Envelope, error)
+	Runtime2AfterRtFunction           func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) error
+	Runtime2MatchmakerMatchedFunction func(entries []*MatchmakerEntry) (string, error)
 )
 
 type RuntimeExecutionMode int
@@ -78,9 +79,10 @@ type Runtime2 struct {
 	providerGo  RuntimeProvider
 	providerLua RuntimeProvider
 
-	rpcFunctions      map[string]Runtime2RpcFunction
-	beforeRtFunctions map[string]Runtime2BeforeRtFunction
-	afterRtFunctions  map[string]Runtime2AfterRtFunction
+	rpcFunctions              map[string]Runtime2RpcFunction
+	beforeRtFunctions         map[string]Runtime2BeforeRtFunction
+	afterRtFunctions          map[string]Runtime2AfterRtFunction
+	matchmakerMatchedFunction Runtime2MatchmakerMatchedFunction
 }
 
 func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter) (*Runtime2, error) {
@@ -108,13 +110,13 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 		return nil, err
 	}
 
-	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goProvider, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
+	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goMatchmakerMatchedFunction, goProvider, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
 	if err != nil {
 		startupLogger.Error("Error initialising Go runtime provider", zap.Error(err))
 		return nil, err
 	}
 
-	luaModules, luaRpcFunctions, luaBeforeRtFunctions, luaAfterRtFunctions, luaProvider, err := NewRuntimeProviderLua(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
+	luaModules, luaRpcFunctions, luaBeforeRtFunctions, luaAfterRtFunctions, luaMatchmakerMatchedFunction, luaProvider, err := NewRuntimeProviderLua(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
 	if err != nil {
 		startupLogger.Error("Error initialising Lua runtime provider", zap.Error(err))
 		return nil, err
@@ -159,12 +161,24 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 		startupLogger.Info("Registered Go runtime After function invocation", zap.String("id", strings.TrimLeft(strings.TrimLeft(id, API_PREFIX), RTAPI_PREFIX)))
 	}
 
+	var allMatchmakerMatchedFunction Runtime2MatchmakerMatchedFunction
+	switch {
+	case goMatchmakerMatchedFunction != nil:
+		allMatchmakerMatchedFunction = goMatchmakerMatchedFunction
+		startupLogger.Info("Registered Go runtime Matchmaker Matched function invocation")
+	case luaMatchmakerMatchedFunction != nil:
+		allMatchmakerMatchedFunction = luaMatchmakerMatchedFunction
+		startupLogger.Info("Registered Lua runtime Matchmaker Matched function invocation")
+	}
+
 	return &Runtime2{
-		providerGo:        goProvider,
-		providerLua:       luaProvider,
-		rpcFunctions:      allRpcFunctions,
-		beforeRtFunctions: allBeforeRtFunctions,
-		afterRtFunctions:  allAfterRtFunctions,
+		providerGo:  goProvider,
+		providerLua: luaProvider,
+
+		rpcFunctions:              allRpcFunctions,
+		beforeRtFunctions:         allBeforeRtFunctions,
+		afterRtFunctions:          allAfterRtFunctions,
+		matchmakerMatchedFunction: allMatchmakerMatchedFunction,
 	}, nil
 }
 
@@ -178,4 +192,8 @@ func (r *Runtime2) BeforeRt(id string) Runtime2BeforeRtFunction {
 
 func (r *Runtime2) AfterRt(id string) Runtime2AfterRtFunction {
 	return r.afterRtFunctions[id]
+}
+
+func (r *Runtime2) MatchmakerMatched() Runtime2MatchmakerMatchedFunction {
+	return r.matchmakerMatchedFunction
 }

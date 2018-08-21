@@ -61,15 +61,12 @@ type PresenceMeta struct {
 func (pm *PresenceMeta) GetHidden() bool {
 	return pm.Hidden
 }
-
 func (pm *PresenceMeta) GetPersistence() bool {
 	return pm.Persistence
 }
-
 func (pm *PresenceMeta) GetUsername() string {
 	return pm.Username
 }
-
 func (pm *PresenceMeta) GetStatus() string {
 	return pm.Status
 }
@@ -84,27 +81,21 @@ type Presence struct {
 func (p *Presence) GetUserId() string {
 	return p.UserID.String()
 }
-
 func (p *Presence) GetSessionId() string {
 	return p.ID.SessionID.String()
 }
-
 func (p *Presence) GetNodeId() string {
 	return p.ID.Node
 }
-
 func (p *Presence) GetHidden() bool {
 	return p.Meta.Hidden
 }
-
 func (p *Presence) GetPersistence() bool {
 	return p.Meta.Persistence
 }
-
 func (p *Presence) GetUsername() string {
 	return p.Meta.Username
 }
-
 func (p *Presence) GetStatus() string {
 	return p.Meta.Status
 }

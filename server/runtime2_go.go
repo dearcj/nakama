@@ -39,9 +39,10 @@ type RuntimeGoInitialiser struct {
 	env    map[string]string
 	nk     runtime.NakamaModule
 
-	rpc      map[string]Runtime2RpcFunction
-	beforeRt map[string]Runtime2BeforeRtFunction
-	afterRt  map[string]Runtime2AfterRtFunction
+	rpc               map[string]Runtime2RpcFunction
+	beforeRt          map[string]Runtime2BeforeRtFunction
+	afterRt           map[string]Runtime2AfterRtFunction
+	matchmakerMatched Runtime2MatchmakerMatchedFunction
 }
 
 func (ri *RuntimeGoInitialiser) RegisterRpc(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error, int)) error {
@@ -72,7 +73,19 @@ func (ri *RuntimeGoInitialiser) RegisterAfterRt(id string, fn func(ctx context.C
 	return nil
 }
 
-func NewRuntimeProviderGo(logger, startupLogger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, RuntimeProvider, error) {
+func (ri *RuntimeGoInitialiser) RegisterMatchmakerMatched(fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk runtime.NakamaModule, entries []runtime.MatchmakerEntry) (string, error)) error {
+	ri.matchmakerMatched = func(entries []*MatchmakerEntry) (string, error) {
+		ctx := NewRuntimeGoContext(ri.env, RuntimeExecutionModeMatchmaker, nil, 0, "", "", "", "", "")
+		runtimeEntries := make([]runtime.MatchmakerEntry, len(entries))
+		for i, entry := range entries {
+			runtimeEntries[i] = runtime.MatchmakerEntry(entry)
+		}
+		return fn(ctx, ri.logger, ri.db, ri.nk, runtimeEntries)
+	}
+	return nil
+}
+
+func NewRuntimeProviderGo(logger, startupLogger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, Runtime2MatchmakerMatchedFunction, RuntimeProvider, error) {
 	modulePaths := make([]string, 0)
 
 	initialiser := &RuntimeGoInitialiser{
@@ -97,21 +110,21 @@ func NewRuntimeProviderGo(logger, startupLogger *zap.Logger, db *sql.DB, config 
 		p, err := plugin.Open(path)
 		if err != nil {
 			startupLogger.Error("Could not open Go module", zap.String("path", path), zap.Error(err))
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 
 		// Look up the required initialisation function.
 		f, err := p.Lookup("InitModule")
 		if err != nil {
 			startupLogger.Fatal("Error looking up InitModule function in Go module", zap.String("name", name))
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 
 		// Ensure the function has the correct signature.
 		fn, ok := f.(func(context.Context, *log.Logger, *sql.DB, runtime.NakamaModule, runtime.Initialiser))
 		if !ok {
 			startupLogger.Fatal("Error reading InitModule function in Go module", zap.String("name", name))
-			return nil, nil, nil, nil, nil, errors.New("error reading InitModule function in Go module")
+			return nil, nil, nil, nil, nil, nil, errors.New("error reading InitModule function in Go module")
 		}
 
 		// Run the initialisation.
@@ -121,5 +134,5 @@ func NewRuntimeProviderGo(logger, startupLogger *zap.Logger, db *sql.DB, config 
 
 	runtimeProviderGo := &RuntimeProviderGo{}
 
-	return modulePaths, initialiser.rpc, initialiser.beforeRt, initialiser.afterRt, runtimeProviderGo, nil
+	return modulePaths, initialiser.rpc, initialiser.beforeRt, initialiser.afterRt, initialiser.matchmakerMatched, runtimeProviderGo, nil
 }

@@ -42,6 +42,7 @@ type Initialiser interface {
 	RegisterRpc(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, payload string) (string, error, int)) error
 	RegisterBeforeRt(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, envelope *rtapi.Envelope) (*rtapi.Envelope, error)) error
 	RegisterAfterRt(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, envelope *rtapi.Envelope) error) error
+	RegisterMatchmakerMatched(fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, entries []MatchmakerEntry) (string, error)) error
 }
 
 type PresenceMeta interface {
@@ -56,6 +57,12 @@ type Presence interface {
 	GetUserId() string
 	GetSessionId() string
 	GetNodeId() string
+}
+
+type MatchmakerEntry interface {
+	GetPresence() Presence
+	GetTicket() string
+	GetProperties() map[string]interface{}
 }
 
 type NotificationSend struct {

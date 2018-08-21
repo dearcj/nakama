@@ -20,6 +20,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/gofrs/uuid"
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/heroiclabs/nakama/rtapi"
 	"github.com/heroiclabs/nakama/social"
@@ -80,7 +82,7 @@ type RuntimeProviderLua struct {
 	statsCtx context.Context
 }
 
-func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, RuntimeProvider, error) {
+func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, Runtime2MatchmakerMatchedFunction, RuntimeProvider, error) {
 	moduleCache := &RuntimeLuaModuleCache{
 		Names:   make([]string, 0),
 		Modules: make(map[string]*RuntimeLuaModule, 0),
@@ -104,7 +106,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 		var err error
 		if content, err = ioutil.ReadFile(path); err != nil {
 			startupLogger.Error("Could not read Lua module", zap.String("path", path), zap.Error(err))
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 
 		relPath, _ := filepath.Rel(rootPath, path)
@@ -133,6 +135,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 	rpcFunctions := make(map[string]Runtime2RpcFunction, 0)
 	beforeRtFunctions := make(map[string]Runtime2BeforeRtFunction, 0)
 	afterRtFunctions := make(map[string]Runtime2AfterRtFunction, 0)
+	var matchmakerMatchedFunction Runtime2MatchmakerMatchedFunction
 
 	runtimeProviderLua := &RuntimeProviderLua{
 		logger:            logger,
@@ -177,12 +180,13 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 			}
 			// TODO afterReq
 		case RuntimeExecutionModeMatchmaker:
-			// TODO
-			//logger.Info("Registered Lua runtime Matchmaker Matched function invocation")
+			matchmakerMatchedFunction = func(entries []*MatchmakerEntry) (string, error) {
+				return runtimeProviderLua.MatchmakerMatched(entries)
+			}
 		}
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	r.Stop()
 
@@ -199,7 +203,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 	}
 	startupLogger.Info("Allocated minimum runtime pool")
 
-	return modulePaths, rpcFunctions, beforeRtFunctions, afterRtFunctions, runtimeProviderLua, nil
+	return modulePaths, rpcFunctions, beforeRtFunctions, afterRtFunctions, matchmakerMatchedFunction, runtimeProviderLua, nil
 }
 
 func (rp *RuntimeProviderLua) Rpc(id string, queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code) {
@@ -349,6 +353,70 @@ func (rp *RuntimeProviderLua) AfterRt(id string, logger *zap.Logger, userID, use
 	}
 
 	return nil
+}
+
+func (rp *RuntimeProviderLua) MatchmakerMatched(entries []*MatchmakerEntry) (string, error) {
+	runtime := rp.Get()
+	lf := runtime.GetCallback(RuntimeExecutionModeMatchmaker, "")
+	if lf == nil {
+		rp.Put(runtime)
+		return "", errors.New("Runtime Matchmaker Matched function not found.")
+	}
+
+	ctx := NewLuaContext(runtime.vm, runtime.luaEnv, ExecutionModeMatchmaker, nil, 0, "", "", "", "", "")
+
+	entriesTable := runtime.vm.CreateTable(len(entries), 0)
+	for i, entry := range entries {
+		presenceTable := runtime.vm.CreateTable(0, 4)
+		presenceTable.RawSetString("user_id", lua.LString(entry.Presence.UserId))
+		presenceTable.RawSetString("session_id", lua.LString(entry.Presence.SessionId))
+		presenceTable.RawSetString("username", lua.LString(entry.Presence.Username))
+		presenceTable.RawSetString("node", lua.LString(entry.Presence.Node))
+
+		propertiesTable := runtime.vm.CreateTable(0, len(entry.StringProperties)+len(entry.NumericProperties))
+		for k, v := range entry.StringProperties {
+			propertiesTable.RawSetString(k, lua.LString(v))
+		}
+		for k, v := range entry.NumericProperties {
+			propertiesTable.RawSetString(k, lua.LNumber(v))
+		}
+
+		entryTable := runtime.vm.CreateTable(0, 2)
+		entryTable.RawSetString("presence", presenceTable)
+		entryTable.RawSetString("properties", propertiesTable)
+
+		entriesTable.RawSetInt(i+1, entryTable)
+	}
+
+	retValue, err, _ := runtime.invokeFunction(runtime.vm, lf, ctx, entriesTable)
+	rp.Put(runtime)
+	if err != nil {
+		return "", fmt.Errorf("Error running runtime Matchmaker Matched hook: %v", err.Error())
+	}
+
+	if retValue == nil || retValue == lua.LNil {
+		// No return value or hook decided not to return an authoritative match ID.
+		return "", nil
+	}
+
+	if retValue.Type() == lua.LTString {
+		// Hook (maybe) returned an authoritative match ID.
+		matchIDString := retValue.String()
+
+		// Validate the match ID.
+		matchIDComponents := strings.SplitN(matchIDString, ".", 2)
+		if len(matchIDComponents) != 2 {
+			return "", errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
+		}
+		_, err = uuid.FromString(matchIDComponents[0])
+		if err != nil {
+			return "", errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
+		}
+
+		return matchIDString, nil
+	}
+
+	return "", errors.New("Unexpected return type from runtime Matchmaker Matched hook, must be string or nil.")
 }
 
 func (rp *RuntimeProviderLua) Get() *RuntimeLua {

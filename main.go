@@ -122,7 +122,7 @@ func main() {
 	if err != nil {
 		startupLogger.Fatal("Failed initializing runtime modules", zap.Error(err))
 	}
-	pipeline := server.NewPipeline(config, db, jsonpbMarshaler, jsonpbUnmarshaler, sessionRegistry, matchRegistry, matchmaker, tracker, router, runtime, runtimePool)
+	pipeline := server.NewPipeline(logger, config, db, jsonpbMarshaler, jsonpbUnmarshaler, sessionRegistry, matchRegistry, matchmaker, tracker, router, runtime, runtimePool)
 	metrics := server.NewMetrics(logger, startupLogger, config)
 
 	consoleServer := server.StartConsoleServer(logger, startupLogger, config, db)
