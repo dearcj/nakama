@@ -35,6 +35,7 @@ import (
 	"github.com/heroiclabs/nakama/rtapi"
 	"github.com/heroiclabs/nakama/social"
 	"github.com/yuin/gopher-lua"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"io"
@@ -67,9 +68,12 @@ type RuntimeLuaNakamaModule struct {
 	once             *sync.Once
 	announceCallback func(RuntimeExecutionMode, string)
 	client           *http.Client
+
+	node          string
+	matchCreateFn Runtime2MatchCreateFunction
 }
 
-func NewRuntimeLuaNakamaModule(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, l *lua.LState, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, once *sync.Once, announceCallback func(RuntimeExecutionMode, string)) *RuntimeLuaNakamaModule {
+func NewRuntimeLuaNakamaModule(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, l *lua.LState, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, once *sync.Once, matchCreateFn Runtime2MatchCreateFunction, announceCallback func(RuntimeExecutionMode, string)) *RuntimeLuaNakamaModule {
 	l.SetContext(context.WithValue(context.Background(), RUNTIME_LUA_CALLBACKS, &RuntimeLuaCallbacks{
 		RPC:    make(map[string]*lua.LFunction),
 		Before: make(map[string]*lua.LFunction),
@@ -90,6 +94,9 @@ func NewRuntimeLuaNakamaModule(logger *zap.Logger, db *sql.DB, config Config, so
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+
+		node:          config.GetName(),
+		matchCreateFn: matchCreateFn,
 	}
 }
 
@@ -2335,9 +2342,30 @@ func (n *RuntimeLuaNakamaModule) matchCreate(l *lua.LState) int {
 	}
 
 	params := RuntimeLuaConvertLuaValue(l.Get(2))
+	var paramsMap map[string]interface{}
+	if params != nil {
+		var ok bool
+		paramsMap, ok = params.(map[string]interface{})
+		if !ok {
+			l.ArgError(2, "expects params to be nil or a table of key-value pairs")
+			return 0
+		}
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	matchLogger := n.logger.With(zap.String("mid", id.String()))
+	label := atomic.NewString("")
+	labelUpdateFn := func(input string) {
+		label.Store(input)
+	}
+	core, err := n.matchCreateFn(matchLogger, id, n.node, name, labelUpdateFn)
+	if err != nil {
+		l.RaiseError("error creating match: %v", err.Error())
+		return 0
+	}
 
 	// Start the match.
-	mh, err := n.matchRegistry.NewMatch(name, params)
+	mh, err := n.matchRegistry.NewMatch(matchLogger, id, label, core, paramsMap)
 	if err != nil {
 		l.RaiseError("error creating match: %v", err.Error())
 		return 0

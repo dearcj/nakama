@@ -43,6 +43,7 @@ type Initialiser interface {
 	RegisterBeforeRt(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, envelope *rtapi.Envelope) (*rtapi.Envelope, error)) error
 	RegisterAfterRt(id string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, envelope *rtapi.Envelope) error) error
 	RegisterMatchmakerMatched(fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, entries []MatchmakerEntry) (string, error)) error
+	RegisterMatch(name string, fn func(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule) (Match, error)) error
 }
 
 type PresenceMeta interface {
@@ -63,6 +64,27 @@ type MatchmakerEntry interface {
 	GetPresence() Presence
 	GetTicket() string
 	GetProperties() map[string]interface{}
+}
+
+type MatchData interface {
+	Presence
+	GetOpCode() int64
+	GetData() []byte
+	GetReceiveTime() int64
+}
+
+type MatchDispatcher interface {
+	BroadcastMessage(opCode int64, data []byte, presences []Presence, sender Presence) error
+	MatchKick(presences []Presence) error
+	MatchLabelUpdate(label string) error
+}
+
+type Match interface {
+	MatchInit(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, params map[string]interface{}) (interface{}, int, string)
+	MatchJoinAttempt(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, dispatcher MatchDispatcher, tick int64, state interface{}, presence Presence) (interface{}, bool, string)
+	MatchJoin(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, dispatcher MatchDispatcher, tick int64, state interface{}, presences []Presence) interface{}
+	MatchLeave(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, dispatcher MatchDispatcher, tick int64, state interface{}, presences []Presence) interface{}
+	MatchLoop(ctx context.Context, logger *log.Logger, db *sql.DB, nk NakamaModule, dispatcher MatchDispatcher, tick int64, state interface{}, messages []MatchData) interface{}
 }
 
 type NotificationSend struct {

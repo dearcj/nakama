@@ -178,8 +178,8 @@ func RuntimeLuaConvertLuaValue(lv lua.LValue) interface{} {
 			// Table.
 			ret := make(map[string]interface{})
 			v.ForEach(func(key, value lua.LValue) {
-				keystr := fmt.Sprint(RuntimeLuaConvertLuaValue(key))
-				ret[keystr] = RuntimeLuaConvertLuaValue(value)
+				keyStr := fmt.Sprint(RuntimeLuaConvertLuaValue(key))
+				ret[keyStr] = RuntimeLuaConvertLuaValue(value)
 			})
 			return ret
 		} else {

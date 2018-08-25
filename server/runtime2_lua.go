@@ -71,9 +71,19 @@ func (mc *RuntimeLuaModuleCache) Add(m *RuntimeLuaModule) {
 type RuntimeProviderLua struct {
 	sync.Mutex
 	logger            *zap.Logger
+	db                *sql.DB
 	jsonpbMarshaler   *jsonpb.Marshaler
 	jsonpbUnmarshaler *jsonpb.Unmarshaler
+	config            Config
+	socialClient      *social.Client
+	leaderboardCache  LeaderboardCache
+	sessionRegistry   *SessionRegistry
+	matchRegistry     MatchRegistry
+	tracker           Tracker
+	router            MessageRouter
+	stdLibs           map[string]lua.LGFunction
 
+	once         *sync.Once
 	poolCh       chan *RuntimeLua
 	maxCount     int
 	currentCount int
@@ -82,7 +92,7 @@ type RuntimeProviderLua struct {
 	statsCtx context.Context
 }
 
-func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, Runtime2MatchmakerMatchedFunction, RuntimeProvider, error) {
+func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler *jsonpb.Marshaler, jsonpbUnmarshaler *jsonpb.Unmarshaler, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, goMatchCreateFn Runtime2MatchCreateFunction, rootPath string, paths []string) ([]string, map[string]Runtime2RpcFunction, map[string]Runtime2BeforeRtFunction, map[string]Runtime2AfterRtFunction, Runtime2MatchmakerMatchedFunction, Runtime2MatchCreateFunction, error) {
 	moduleCache := &RuntimeLuaModuleCache{
 		Names:   make([]string, 0),
 		Modules: make(map[string]*RuntimeLuaModule, 0),
@@ -137,17 +147,38 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 	afterRtFunctions := make(map[string]Runtime2AfterRtFunction, 0)
 	var matchmakerMatchedFunction Runtime2MatchmakerMatchedFunction
 
+	allMatchCreateFn := func(logger *zap.Logger, id uuid.UUID, node string, name string, labelUpdateFn func(string)) (Runtime2MatchCore, error) {
+		core, err := goMatchCreateFn(logger, id, node, name, labelUpdateFn)
+		if err != nil {
+			return nil, err
+		}
+		if core != nil {
+			return core, nil
+		}
+		return NewRuntime2LuaMatchCore(logger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, stdLibs, once, goMatchCreateFn, id, node, name, labelUpdateFn)
+	}
+
 	runtimeProviderLua := &RuntimeProviderLua{
 		logger:            logger,
+		db:                db,
 		jsonpbMarshaler:   jsonpbMarshaler,
 		jsonpbUnmarshaler: jsonpbUnmarshaler,
+		config:            config,
+		socialClient:      socialClient,
+		leaderboardCache:  leaderboardCache,
+		sessionRegistry:   sessionRegistry,
+		matchRegistry:     matchRegistry,
+		tracker:           tracker,
+		router:            router,
+		stdLibs:           stdLibs,
 
+		once:     once,
 		poolCh:   make(chan *RuntimeLua, config.GetRuntime().MaxCount),
 		maxCount: config.GetRuntime().MaxCount,
 		// Set the current count assuming we'll warm up the pool in a moment.
 		currentCount: config.GetRuntime().MinCount,
 		newFn: func() *RuntimeLua {
-			r, err := newRuntimeLuaVM(logger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, stdLibs, moduleCache, once, nil)
+			r, err := newRuntimeLuaVM(logger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, stdLibs, moduleCache, once, allMatchCreateFn, nil)
 			if err != nil {
 				logger.Fatal("Failed to initialize Lua runtime", zap.Error(err))
 			}
@@ -159,7 +190,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 
 	startupLogger.Info("Evaluating Lua runtime modules")
 
-	r, err := newRuntimeLuaVM(logger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, stdLibs, moduleCache, once, func(execMode RuntimeExecutionMode, id string) {
+	r, err := newRuntimeLuaVM(logger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, stdLibs, moduleCache, once, allMatchCreateFn, func(execMode RuntimeExecutionMode, id string) {
 		switch execMode {
 		case RuntimeExecutionModeRPC:
 			rpcFunctions[id] = func(queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code) {
@@ -203,7 +234,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 	}
 	startupLogger.Info("Allocated minimum runtime pool")
 
-	return modulePaths, rpcFunctions, beforeRtFunctions, afterRtFunctions, matchmakerMatchedFunction, runtimeProviderLua, nil
+	return modulePaths, rpcFunctions, beforeRtFunctions, afterRtFunctions, matchmakerMatchedFunction, allMatchCreateFn, nil
 }
 
 func (rp *RuntimeProviderLua) Rpc(id string, queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code) {
@@ -644,7 +675,7 @@ func (r *RuntimeLua) Stop() {
 	r.vm.Close()
 }
 
-func newRuntimeLuaVM(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, stdLibs map[string]lua.LGFunction, moduleCache *RuntimeLuaModuleCache, once *sync.Once, announceCallback func(RuntimeExecutionMode, string)) (*RuntimeLua, error) {
+func newRuntimeLuaVM(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter, stdLibs map[string]lua.LGFunction, moduleCache *RuntimeLuaModuleCache, once *sync.Once, matchCreateFn Runtime2MatchCreateFunction, announceCallback func(RuntimeExecutionMode, string)) (*RuntimeLua, error) {
 	// Initialize a one-off runtime to ensure startup code runs and modules are valid.
 	vm := lua.NewState(lua.Options{
 		CallStackSize:       config.GetRuntime().CallStackSize,
@@ -657,7 +688,7 @@ func newRuntimeLuaVM(logger *zap.Logger, db *sql.DB, config Config, socialClient
 		vm.Push(lua.LString(name))
 		vm.Call(1, 0)
 	}
-	nakamaModule := NewRuntimeLuaNakamaModule(logger, db, config, socialClient, leaderboardCache, vm, sessionRegistry, matchRegistry, tracker, router, once, announceCallback)
+	nakamaModule := NewRuntimeLuaNakamaModule(logger, db, config, socialClient, leaderboardCache, vm, sessionRegistry, matchRegistry, tracker, router, once, matchCreateFn, announceCallback)
 	vm.PreloadModule("nakama", nakamaModule.Loader)
 	r := &RuntimeLua{
 		logger: logger,

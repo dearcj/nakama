@@ -16,6 +16,7 @@ package server
 
 import (
 	"database/sql"
+	"github.com/gofrs/uuid"
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/heroiclabs/nakama/rtapi"
 	"github.com/heroiclabs/nakama/social"
@@ -39,6 +40,8 @@ type (
 	Runtime2BeforeRtFunction          func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) (*rtapi.Envelope, error)
 	Runtime2AfterRtFunction           func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) error
 	Runtime2MatchmakerMatchedFunction func(entries []*MatchmakerEntry) (string, error)
+
+	Runtime2MatchCreateFunction func(logger *zap.Logger, id uuid.UUID, node string, name string, labelUpdateFn func(string)) (Runtime2MatchCore, error)
 )
 
 type RuntimeExecutionMode int
@@ -50,6 +53,7 @@ const (
 	RuntimeExecutionModeAfter
 	RuntimeExecutionModeMatch
 	RuntimeExecutionModeMatchmaker
+	RuntimeExecutionModeMatchCreate
 )
 
 func (e RuntimeExecutionMode) String() string {
@@ -66,19 +70,22 @@ func (e RuntimeExecutionMode) String() string {
 		return "match"
 	case RuntimeExecutionModeMatchmaker:
 		return "matchmaker"
+	case RuntimeExecutionModeMatchCreate:
+		return "match_create"
 	}
 
 	return ""
 }
 
-type RuntimeProvider interface {
-	// TODO
+type Runtime2MatchCore interface {
+	MatchInit(params map[string]interface{}) (interface{}, int, string, error)
+	MatchJoinAttempt(tick int64, state interface{}, userID, sessionID uuid.UUID, username, node string) (interface{}, bool, string, error)
+	MatchJoin(tick int64, state interface{}, joins []*MatchPresence) (interface{}, error)
+	MatchLeave(tick int64, state interface{}, leaves []*MatchPresence) (interface{}, error)
+	MatchLoop(tick int64, state interface{}, inputCh chan *MatchDataMessage) (interface{}, error)
 }
 
 type Runtime2 struct {
-	providerGo  RuntimeProvider
-	providerLua RuntimeProvider
-
 	rpcFunctions              map[string]Runtime2RpcFunction
 	beforeRtFunctions         map[string]Runtime2BeforeRtFunction
 	afterRtFunctions          map[string]Runtime2AfterRtFunction
@@ -110,17 +117,20 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 		return nil, err
 	}
 
-	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goMatchmakerMatchedFunction, goProvider, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
+	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goMatchmakerMatchedFunction, goMatchCreateFn, goSetMatchCreateFn, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
 	if err != nil {
 		startupLogger.Error("Error initialising Go runtime provider", zap.Error(err))
 		return nil, err
 	}
 
-	luaModules, luaRpcFunctions, luaBeforeRtFunctions, luaAfterRtFunctions, luaMatchmakerMatchedFunction, luaProvider, err := NewRuntimeProviderLua(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
+	luaModules, luaRpcFunctions, luaBeforeRtFunctions, luaAfterRtFunctions, luaMatchmakerMatchedFunction, allMatchCreateFn, err := NewRuntimeProviderLua(logger, startupLogger, db, jsonpbMarshaler, jsonpbUnmarshaler, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, goMatchCreateFn, runtimeConfig.Path, paths)
 	if err != nil {
 		startupLogger.Error("Error initialising Lua runtime provider", zap.Error(err))
 		return nil, err
 	}
+
+	// allMatchCreateFn has already been set up by the Lua side to multiplex, now tell the Go side to use it too.
+	goSetMatchCreateFn(allMatchCreateFn)
 
 	allModules := make([]string, 0, len(goModules)+len(luaModules))
 	for _, module := range luaModules {
@@ -172,9 +182,6 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 	}
 
 	return &Runtime2{
-		providerGo:  goProvider,
-		providerLua: luaProvider,
-
 		rpcFunctions:              allRpcFunctions,
 		beforeRtFunctions:         allBeforeRtFunctions,
 		afterRtFunctions:          allAfterRtFunctions,

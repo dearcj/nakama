@@ -26,12 +26,15 @@ import (
 	"github.com/heroiclabs/nakama/runtime"
 	"github.com/heroiclabs/nakama/social"
 	"github.com/pkg/errors"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"strings"
+	"sync"
 	"time"
 )
 
 type RuntimeGoNakamaModule struct {
+	sync.RWMutex
 	logger           *zap.Logger
 	db               *sql.DB
 	config           Config
@@ -41,9 +44,13 @@ type RuntimeGoNakamaModule struct {
 	matchRegistry    MatchRegistry
 	tracker          Tracker
 	router           MessageRouter
+
+	node string
+
+	matchCreateFn Runtime2MatchCreateFunction
 }
 
-func NewRuntimeGoNakamaModule(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter) runtime.NakamaModule {
+func NewRuntimeGoNakamaModule(logger *zap.Logger, db *sql.DB, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, sessionRegistry *SessionRegistry, matchRegistry MatchRegistry, tracker Tracker, router MessageRouter) *RuntimeGoNakamaModule {
 	return &RuntimeGoNakamaModule{
 		logger:           logger,
 		db:               db,
@@ -54,6 +61,8 @@ func NewRuntimeGoNakamaModule(logger *zap.Logger, db *sql.DB, config Config, soc
 		matchRegistry:    matchRegistry,
 		tracker:          tracker,
 		router:           router,
+
+		node: config.GetName(),
 	}
 }
 
@@ -611,8 +620,25 @@ func (n *RuntimeGoNakamaModule) MatchCreate(module string, params map[string]int
 		return "", errors.New("expects module name")
 	}
 
+	id := uuid.Must(uuid.NewV4())
+	matchLogger := n.logger.With(zap.String("mid", id.String()))
+	label := atomic.NewString("")
+	labelUpdateFn := func(input string) {
+		label.Store(input)
+	}
+	n.RLock()
+	fn := n.matchCreateFn
+	n.RUnlock()
+	core, err := fn(matchLogger, id, n.node, module, labelUpdateFn)
+	if err != nil {
+		return "", err
+	}
+	if core == nil {
+		return "", errors.New("error creating match: not found")
+	}
+
 	// Start the match.
-	mh, err := n.matchRegistry.NewMatch(module, params)
+	mh, err := n.matchRegistry.NewMatch(matchLogger, id, label, core, params)
 	if err != nil {
 		return "", errors.Errorf("error creating match: %v", err.Error())
 	}
@@ -1196,4 +1222,10 @@ func (n *RuntimeGoNakamaModule) UserGroupsList(userID string) ([]*api.UserGroupL
 	}
 
 	return groups.UserGroups, nil
+}
+
+func (n *RuntimeGoNakamaModule) SetMatchCreateFn(fn Runtime2MatchCreateFunction) {
+	n.Lock()
+	n.matchCreateFn = fn
+	n.Unlock()
 }

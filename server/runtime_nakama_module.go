@@ -2340,23 +2340,36 @@ func (n *NakamaModule) streamSend(l *lua.LState) int {
 
 func (n *NakamaModule) matchCreate(l *lua.LState) int {
 	// Parse the name of the Lua module that should handle the match.
-	name := l.CheckString(1)
-	if name == "" {
-		l.ArgError(1, "expects module name")
-		return 0
-	}
+	//name := l.CheckString(1)
+	//if name == "" {
+	//	l.ArgError(1, "expects module name")
+	//	return 0
+	//}
+	//
+	//params := ConvertLuaValue(l.Get(2))
+	//var paramsMap map[string]interface{}
+	//if params != nil {
+	//	var ok bool
+	//	paramsMap, ok = params.(map[string]interface{})
+	//	if !ok {
+	//		l.ArgError(2, "expects params to be nil or a table of key-value pairs")
+	//		return 0
+	//	}
+	//}
+	//
+	//// Start the match.
+	//mh, err := n.matchRegistry.NewMatch(name, paramsMap)
+	//if err != nil {
+	//	l.RaiseError("error creating match: %v", err.Error())
+	//	return 0
+	//}
+	//
+	//// Return the match ID in a form that can be directly sent to clients.
+	//l.Push(lua.LString(mh.IDStr))
+	//return 1
 
-	params := ConvertLuaValue(l.Get(2))
-
-	// Start the match.
-	mh, err := n.matchRegistry.NewMatch(name, params)
-	if err != nil {
-		l.RaiseError("error creating match: %v", err.Error())
-		return 0
-	}
-
-	// Return the match ID in a form that can be directly sent to clients.
-	l.Push(lua.LString(mh.IDStr))
+	// Code path no longer used.
+	l.Push(lua.LString(""))
 	return 1
 }
 
