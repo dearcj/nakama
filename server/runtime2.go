@@ -39,7 +39,7 @@ type (
 	Runtime2RpcFunction               func(queryParams map[string][]string, userID, username string, expiry int64, sessionID, clientIP, clientPort, payload string) (string, error, codes.Code)
 	Runtime2BeforeRtFunction          func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) (*rtapi.Envelope, error)
 	Runtime2AfterRtFunction           func(logger *zap.Logger, userID, username string, expiry int64, sessionID, clientIP, clientPort string, envelope *rtapi.Envelope) error
-	Runtime2MatchmakerMatchedFunction func(entries []*MatchmakerEntry) (string, error)
+	Runtime2MatchmakerMatchedFunction func(entries []*MatchmakerEntry) (string, bool, error)
 
 	Runtime2MatchCreateFunction func(logger *zap.Logger, id uuid.UUID, node string, name string, labelUpdateFn func(string)) (Runtime2MatchCore, error)
 )
@@ -117,7 +117,7 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 		return nil, err
 	}
 
-	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goMatchmakerMatchedFunction, goMatchCreateFn, goSetMatchCreateFn, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
+	goModules, goRpcFunctions, goBeforeRtFunctions, goAfterRtFunctions, goMatchmakerMatchedFunction, goMatchCreateFn, goSetMatchCreateFn, goMatchNamesListFn, err := NewRuntimeProviderGo(logger, startupLogger, db, config, socialClient, leaderboardCache, sessionRegistry, matchRegistry, tracker, router, runtimeConfig.Path, paths)
 	if err != nil {
 		startupLogger.Error("Error initialising Go runtime provider", zap.Error(err))
 		return nil, err
@@ -179,6 +179,12 @@ func NewRuntime2(logger, startupLogger *zap.Logger, db *sql.DB, jsonpbMarshaler 
 	case luaMatchmakerMatchedFunction != nil:
 		allMatchmakerMatchedFunction = luaMatchmakerMatchedFunction
 		startupLogger.Info("Registered Lua runtime Matchmaker Matched function invocation")
+	}
+
+	// Lua matches are not registered the same, list only Go ones.
+	goMatchNames := goMatchNamesListFn()
+	for _, name := range goMatchNames {
+		startupLogger.Info("Registered Go runtime Match creation function invocation", zap.String("name", name))
 	}
 
 	return &Runtime2{

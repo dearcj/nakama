@@ -211,7 +211,7 @@ func NewRuntimeProviderLua(logger, startupLogger *zap.Logger, db *sql.DB, jsonpb
 			}
 			// TODO afterReq
 		case RuntimeExecutionModeMatchmaker:
-			matchmakerMatchedFunction = func(entries []*MatchmakerEntry) (string, error) {
+			matchmakerMatchedFunction = func(entries []*MatchmakerEntry) (string, bool, error) {
 				return runtimeProviderLua.MatchmakerMatched(entries)
 			}
 		}
@@ -386,12 +386,12 @@ func (rp *RuntimeProviderLua) AfterRt(id string, logger *zap.Logger, userID, use
 	return nil
 }
 
-func (rp *RuntimeProviderLua) MatchmakerMatched(entries []*MatchmakerEntry) (string, error) {
+func (rp *RuntimeProviderLua) MatchmakerMatched(entries []*MatchmakerEntry) (string, bool, error) {
 	runtime := rp.Get()
 	lf := runtime.GetCallback(RuntimeExecutionModeMatchmaker, "")
 	if lf == nil {
 		rp.Put(runtime)
-		return "", errors.New("Runtime Matchmaker Matched function not found.")
+		return "", false, errors.New("Runtime Matchmaker Matched function not found.")
 	}
 
 	ctx := NewLuaContext(runtime.vm, runtime.luaEnv, ExecutionModeMatchmaker, nil, 0, "", "", "", "", "")
@@ -422,12 +422,12 @@ func (rp *RuntimeProviderLua) MatchmakerMatched(entries []*MatchmakerEntry) (str
 	retValue, err, _ := runtime.invokeFunction(runtime.vm, lf, ctx, entriesTable)
 	rp.Put(runtime)
 	if err != nil {
-		return "", fmt.Errorf("Error running runtime Matchmaker Matched hook: %v", err.Error())
+		return "", false, fmt.Errorf("Error running runtime Matchmaker Matched hook: %v", err.Error())
 	}
 
 	if retValue == nil || retValue == lua.LNil {
 		// No return value or hook decided not to return an authoritative match ID.
-		return "", nil
+		return "", false, nil
 	}
 
 	if retValue.Type() == lua.LTString {
@@ -437,17 +437,17 @@ func (rp *RuntimeProviderLua) MatchmakerMatched(entries []*MatchmakerEntry) (str
 		// Validate the match ID.
 		matchIDComponents := strings.SplitN(matchIDString, ".", 2)
 		if len(matchIDComponents) != 2 {
-			return "", errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
+			return "", false, errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
 		}
 		_, err = uuid.FromString(matchIDComponents[0])
 		if err != nil {
-			return "", errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
+			return "", false, errors.New("Invalid return value from runtime Matchmaker Matched hook, not a valid match ID.")
 		}
 
-		return matchIDString, nil
+		return matchIDString, true, nil
 	}
 
-	return "", errors.New("Unexpected return type from runtime Matchmaker Matched hook, must be string or nil.")
+	return "", false, errors.New("Unexpected return type from runtime Matchmaker Matched hook, must be string or nil.")
 }
 
 func (rp *RuntimeProviderLua) Get() *RuntimeLua {
